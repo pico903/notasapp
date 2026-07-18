@@ -54,6 +54,7 @@
   let editingId = null;
   let notesChannel = null;
   let refreshTimer = null;
+  let renderInFlight = false;
 
   function mapSupabaseNote(note){
     return {
@@ -66,18 +67,28 @@
     };
   }
 
-  async function handleRealtimeChange(){
-    await renderNotes();
+  async function refreshNotes(){
+    if(renderInFlight) return;
+    renderInFlight = true;
+    try{
+      await renderNotes();
+    } catch(err){
+      console.error('Error al refrescar notas:', err);
+    } finally{
+      renderInFlight = false;
+    }
   }
 
   function startPolling(){
     if(refreshTimer) return;
     refreshTimer = window.setInterval(() => {
-      renderNotes().catch(err => console.error('Error al refrescar notas:', err));
-    }, 5000);
+      refreshNotes().catch(err => console.error('Error al refrescar notas:', err));
+    }, 2500);
   }
 
   function setupRealtimeSync(){
+    startPolling();
+
     if(notesChannel) return;
 
     notesChannel = supabase.channel('notes-updates');
@@ -86,18 +97,16 @@
       event: '*',
       schema: 'public',
       table: TABLE_NAME
-    }, handleRealtimeChange);
+    }, () => {
+      console.info('Cambio detectado en Supabase, refrescando lista');
+      refreshNotes();
+    });
 
     notesChannel.subscribe((status) => {
       if(status === 'SUBSCRIBED'){
         console.info('Sincronización en tiempo real activada');
-        if(refreshTimer){
-          window.clearInterval(refreshTimer);
-          refreshTimer = null;
-        }
       } else if(status === 'CHANNEL_ERROR' || status === 'TIMED_OUT'){
         console.warn('Realtime no disponible; activando refresco periódico');
-        startPolling();
       }
     });
   }
@@ -293,7 +302,7 @@
     }
 
     await saveNotes(notes);
-    await renderNotes();
+    await refreshNotes();
     closeEditor();
   });
 
@@ -302,7 +311,11 @@
 
   // Inicializar
   setupRealtimeSync();
+  window.addEventListener('focus', () => refreshNotes());
+  document.addEventListener('visibilitychange', () => {
+    if(document.visibilityState === 'visible') refreshNotes();
+  });
   window.addEventListener('beforeunload', stopRealtimeSync);
-  renderNotes();
+  refreshNotes();
 
 })();
