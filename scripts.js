@@ -52,6 +52,66 @@
 
   // Estado: id de nota que estamos editando (null = nueva nota)
   let editingId = null;
+  let notesChannel = null;
+  let refreshTimer = null;
+
+  function mapSupabaseNote(note){
+    return {
+      ...note,
+      id: normalizeNoteId(note),
+      title: note.titulo ?? note.title ?? '',
+      body: note.contenido ?? note.body ?? '',
+      category: note.category || '',
+      date: note.date ?? 'Hoy'
+    };
+  }
+
+  async function handleRealtimeChange(){
+    await renderNotes();
+  }
+
+  function startPolling(){
+    if(refreshTimer) return;
+    refreshTimer = window.setInterval(() => {
+      renderNotes().catch(err => console.error('Error al refrescar notas:', err));
+    }, 5000);
+  }
+
+  function setupRealtimeSync(){
+    if(notesChannel) return;
+
+    notesChannel = supabase.channel('notes-updates');
+
+    notesChannel.on('postgres_changes', {
+      event: '*',
+      schema: 'public',
+      table: TABLE_NAME
+    }, handleRealtimeChange);
+
+    notesChannel.subscribe((status) => {
+      if(status === 'SUBSCRIBED'){
+        console.info('Sincronización en tiempo real activada');
+        if(refreshTimer){
+          window.clearInterval(refreshTimer);
+          refreshTimer = null;
+        }
+      } else if(status === 'CHANNEL_ERROR' || status === 'TIMED_OUT'){
+        console.warn('Realtime no disponible; activando refresco periódico');
+        startPolling();
+      }
+    });
+  }
+
+  function stopRealtimeSync(){
+    if(notesChannel){
+      supabase.removeChannel(notesChannel);
+      notesChannel = null;
+    }
+    if(refreshTimer){
+      window.clearInterval(refreshTimer);
+      refreshTimer = null;
+    }
+  }
 
   // Cargar notas desde Supabase o usar ejemplos
   async function loadNotes(){
@@ -63,14 +123,7 @@
 
       if(error) throw error;
       if(!data || data.length === 0) return getSampleNotes();
-      return data.map(note => ({
-        ...note,
-        id: normalizeNoteId(note),
-        title: note.titulo ?? note.title ?? '',
-        body: note.contenido ?? note.body ?? '',
-        category: note.category || '',
-        date: note.date ?? 'Hoy'
-      }));
+      return data.map(mapSupabaseNote);
     }catch(e){
       console.error('Error leyendo notas:', e);
       return getSampleNotes();
@@ -248,6 +301,8 @@
   newNoteBtn.addEventListener('click', () => openEditor(null));
 
   // Inicializar
+  setupRealtimeSync();
+  window.addEventListener('beforeunload', stopRealtimeSync);
   renderNotes();
 
 })();
