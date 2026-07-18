@@ -21,6 +21,18 @@
 
       <div id="notesGrid" class="notes-grid" aria-live="polite"></div>
     </section>
+
+    <section class="chat-panel" aria-label="Panel de chat">
+      <div class="chat-header">
+        <h2>Asistente de notas</h2>
+        <span class="chat-status">Powered by Groq</span>
+      </div>
+      <div id="chatMessages" class="chat-messages" aria-live="polite"></div>
+      <form id="chatForm" class="chat-form">
+        <input id="chatInput" type="text" placeholder="Pregunta algo sobre tus notas..." autocomplete="off">
+        <button class="btn btn-primary" type="submit">Enviar</button>
+      </form>
+    </section>
   </main>
 
   <footer class="site-footer">

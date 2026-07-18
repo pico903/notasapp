@@ -49,6 +49,9 @@
   const contentInput = document.getElementById('content');
   const categoryInputs = document.querySelectorAll('input[name="category"]');
   const modalTitle = document.getElementById('modal-title');
+  const chatForm = document.getElementById('chatForm');
+  const chatInput = document.getElementById('chatInput');
+  const chatMessages = document.getElementById('chatMessages');
 
   // Estado: id de nota que estamos editando (null = nueva nota)
   let editingId = null;
@@ -304,6 +307,52 @@
     await saveNotes(notes);
     await refreshNotes();
     closeEditor();
+  });
+
+  function addChatMessage(role, text){
+    const bubble = document.createElement('div');
+    bubble.className = `chat-bubble ${role}`;
+    bubble.textContent = text;
+    chatMessages.appendChild(bubble);
+    chatMessages.scrollTop = chatMessages.scrollHeight;
+  }
+
+  async function askChatAssistant(question){
+    const notes = await loadNotes();
+    addChatMessage('user', question);
+    const thinking = document.createElement('div');
+    thinking.className = 'chat-bubble assistant';
+    thinking.textContent = 'Estoy pensando...';
+    chatMessages.appendChild(thinking);
+    chatMessages.scrollTop = chatMessages.scrollHeight;
+
+    try{
+      const response = await fetch('/api/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ question, notes })
+      });
+
+      const payload = await response.json();
+      thinking.remove();
+      if(!response.ok){
+        addChatMessage('assistant', payload.error || 'No pude responder.');
+        return;
+      }
+      addChatMessage('assistant', payload.answer || 'Sin respuesta.');
+    }catch(err){
+      thinking.remove();
+      addChatMessage('assistant', 'No se pudo conectar con el asistente.');
+      console.error(err);
+    }
+  }
+
+  chatForm.addEventListener('submit', async function(e){
+    e.preventDefault();
+    const question = chatInput.value.trim();
+    if(!question) return;
+    chatInput.value = '';
+    await askChatAssistant(question);
   });
 
   // Abrir modal para nueva nota
