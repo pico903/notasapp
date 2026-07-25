@@ -8,6 +8,74 @@
 
   const supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
+  let currentSession = null;
+  let isRegisterMode = false;
+
+  const authSection = document.getElementById('authSection');
+  const appSection = document.getElementById('appSection');
+  const authForm = document.getElementById('authForm');
+  const authEmail = document.getElementById('authEmail');
+  const authPassword = document.getElementById('authPassword');
+  const authMessage = document.getElementById('authMessage');
+  const authTitle = document.getElementById('authTitle');
+  const authToggleText = document.getElementById('authToggleText');
+  const toggleRegisterBtn = document.getElementById('toggleRegisterBtn');
+  const logoutBtn = document.getElementById('logoutBtn');
+  const userEmailSpan = document.getElementById('userEmail');
+
+  function setAuthView(isLoggedIn){
+    authSection.classList.toggle('hidden', isLoggedIn);
+    appSection.classList.toggle('hidden', !isLoggedIn);
+    newNoteBtn.classList.toggle('hidden', !isLoggedIn);
+    logoutBtn.classList.toggle('hidden', !isLoggedIn);
+    userEmailSpan.classList.toggle('hidden', !isLoggedIn);
+  }
+
+  function updateAuthUi(session){
+    const user = session?.user;
+    const signedIn = !!user;
+
+    if(signedIn){
+      authTitle.textContent = 'Bienvenido';
+      authMessage.textContent = `Conectado como ${user.email || 'usuario'}.`;
+      userEmailSpan.textContent = user.email || 'Usuario';
+    } else {
+      authTitle.textContent = isRegisterMode ? 'Crear cuenta' : 'Iniciar sesión';
+      authMessage.textContent = isRegisterMode
+        ? 'Regístrate con email y contraseña.'
+        : 'Accede para ver tu cuaderno privado.';
+      userEmailSpan.textContent = '';
+    }
+
+    authForm.querySelector('button[type="submit"]').textContent = isRegisterMode ? 'Crear cuenta' : 'Entrar';
+    authToggleText.textContent = isRegisterMode ? '¿Ya tienes cuenta?' : '¿No tienes cuenta?';
+    toggleRegisterBtn.textContent = isRegisterMode ? 'Inicia sesión' : 'Regístrate';
+    setAuthView(signedIn);
+  }
+
+  async function initAuth(){
+    const { data } = await supabase.auth.getSession();
+    currentSession = data.session;
+    updateAuthUi(currentSession);
+
+    if(currentSession?.user){
+      await refreshNotes();
+      setupRealtimeSync();
+    }
+  }
+
+  supabase.auth.onAuthStateChange((event, session) => {
+    currentSession = session;
+    updateAuthUi(session);
+
+    if(session?.user){
+      refreshNotes();
+      setupRealtimeSync();
+    } else {
+      stopRealtimeSync();
+    }
+  });
+
   function getCategoryId(category){
     return CATEGORY_ID_BY_LABEL[category] ?? null;
   }
@@ -128,33 +196,44 @@
   // Cargar notas desde Supabase o usar ejemplos
   async function loadNotes(){
     try{
+      const session = currentSession || (await supabase.auth.getSession()).data.session;
+      if(!session?.user) return [];
+
+      const userId = session.user.id;
       const { data, error } = await supabase
         .from(TABLE_NAME)
         .select('*')
+        .eq('user_id', userId)
         .order('id', { ascending: false });
 
       if(error) throw error;
-      if(!data || data.length === 0) return getSampleNotes();
-      return data.map(mapSupabaseNote);
+      return (data || []).map(mapSupabaseNote);
     }catch(e){
       console.error('Error leyendo notas:', e);
-      return getSampleNotes();
+      return [];
     }
   }
 
   async function saveNotes(notes){
     try{
+      const session = currentSession || (await supabase.auth.getSession()).data.session;
+      if(!session?.user) throw new Error('Usuario no autenticado.');
+
+      const userId = session.user.id;
       const normalized = notes.map(note => ({
         id: normalizeNoteId(note),
         titulo: note.title ?? '',
         contenido: note.body ?? '',
+        category: note.category ?? '',
         creada_en: note.creada_en ?? new Date().toISOString(),
-        modificada_en: note.modificada_en ?? new Date().toISOString()
+        modificada_en: new Date().toISOString(),
+        user_id: userId
       }));
 
       const { data: existingRows, error: listError } = await supabase
         .from(TABLE_NAME)
-        .select('id');
+        .select('id')
+        .eq('user_id', userId);
 
       if(listError) throw listError;
 
@@ -167,7 +246,8 @@
         const { error: deleteError } = await supabase
           .from(TABLE_NAME)
           .delete()
-          .in('id', toDelete);
+          .in('id', toDelete)
+          .eq('user_id', userId);
         if(deleteError) throw deleteError;
       }
 
@@ -355,16 +435,53 @@
     await askChatAssistant(question);
   });
 
+  // Login / registro
+  authForm.addEventListener('submit', async function(e){
+    e.preventDefault();
+    const email = authEmail.value.trim();
+    const password = authPassword.value;
+
+    if(!email || !password){
+      alert('Completa email y contraseña.');
+      return;
+    }
+
+    try{
+      if(isRegisterMode){
+        const { error } = await supabase.auth.signUp({ email, password });
+        if(error) throw error;
+        authMessage.textContent = 'Cuenta creada, revisa tu email si corresponde para activar el acceso.';
+      } else {
+        const { error } = await supabase.auth.signInWithPassword({ email, password });
+        if(error) throw error;
+      }
+    }catch(err){
+      console.error('Error de autenticación:', err);
+      alert(err.message || 'No se pudo iniciar sesión. Revisa tus credenciales.');
+    }
+  });
+
+  toggleRegisterBtn.addEventListener('click', () => {
+    isRegisterMode = !isRegisterMode;
+    updateAuthUi(currentSession);
+    authPassword.autocomplete = isRegisterMode ? 'new-password' : 'current-password';
+  });
+
+  logoutBtn.addEventListener('click', async () => {
+    await supabase.auth.signOut();
+  });
+
   // Abrir modal para nueva nota
   newNoteBtn.addEventListener('click', () => openEditor(null));
 
   // Inicializar
-  setupRealtimeSync();
-  window.addEventListener('focus', () => refreshNotes());
+  initAuth();
+  window.addEventListener('focus', () => {
+    if(!appSection.classList.contains('hidden')) refreshNotes();
+  });
   document.addEventListener('visibilitychange', () => {
-    if(document.visibilityState === 'visible') refreshNotes();
+    if(document.visibilityState === 'visible' && !appSection.classList.contains('hidden')) refreshNotes();
   });
   window.addEventListener('beforeunload', stopRealtimeSync);
-  refreshNotes();
 
 })();

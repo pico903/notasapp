@@ -10,29 +10,63 @@
   <header class="site-header">
     <div class="container header-inner">
       <a class="brand" href="#">Notas<span>App</span></a>
-      <button id="newNoteBtn" class="btn btn-primary new-note" type="button">+ Nueva nota</button>
+      <div class="header-actions">
+        <span id="userEmail" class="user-email hidden"></span>
+        <button id="newNoteBtn" class="btn btn-primary new-note hidden" type="button">+ Nueva nota</button>
+        <button id="logoutBtn" class="btn btn-outline hidden" type="button">Cerrar sesión</button>
+      </div>
     </div>
   </header>
 
   <main class="container">
-    <section aria-labelledby="mis-notas" class="notes-section">
-      <h1 id="mis-notas">Mis notas</h1>
-      <p class="lead">Todo lo que no quiero olvidar, en un solo lugar.</p>
+    <section id="authSection" class="auth-section">
+      <div class="auth-card">
+        <h1 id="authTitle">Iniciar sesión</h1>
+        <p id="authMessage" class="auth-message">Accede para ver tu cuaderno privado.</p>
 
-      <div id="notesGrid" class="notes-grid" aria-live="polite"></div>
-    </section>
+        <form id="authForm" class="auth-form">
+          <div class="form-row">
+            <label for="authEmail">Email</label>
+            <input id="authEmail" type="email" autocomplete="email" required placeholder="correo@ejemplo.com">
+          </div>
 
-    <section class="chat-panel" aria-label="Panel de chat">
-      <div class="chat-header">
-        <h2>Asistente de notas</h2>
-        <span class="chat-status">Powered by Groq</span>
+          <div class="form-row">
+            <label for="authPassword">Contraseña</label>
+            <input id="authPassword" type="password" autocomplete="current-password" required placeholder="********">
+          </div>
+
+          <div class="form-actions auth-actions">
+            <button class="btn btn-primary" type="submit">Entrar</button>
+          </div>
+        </form>
+
+        <div class="auth-toggle">
+          <p id="authToggleText">¿No tienes cuenta?</p>
+          <button id="toggleRegisterBtn" class="btn btn-link" type="button">Regístrate</button>
+        </div>
       </div>
-      <div id="chatMessages" class="chat-messages" aria-live="polite"></div>
-      <form id="chatForm" class="chat-form">
-        <input id="chatInput" type="text" placeholder="Pregunta algo sobre tus notas..." autocomplete="off">
-        <button class="btn btn-primary" type="submit">Enviar</button>
-      </form>
     </section>
+
+    <div id="appSection" class="app-view hidden">
+      <section aria-labelledby="mis-notas" class="notes-section">
+        <h1 id="mis-notas">Mis notas</h1>
+        <p class="lead">Todo lo que no quiero olvidar, en un solo lugar.</p>
+
+        <div id="notesGrid" class="notes-grid" aria-live="polite"></div>
+      </section>
+
+      <section class="chat-panel" aria-label="Panel de chat">
+        <div class="chat-header">
+          <h2>Asistente de notas</h2>
+          <span class="chat-status">Powered by Groq</span>
+        </div>
+        <div id="chatMessages" class="chat-messages" aria-live="polite"></div>
+        <form id="chatForm" class="chat-form">
+          <input id="chatInput" type="text" placeholder="Pregunta algo sobre tus notas..." autocomplete="off">
+          <button class="btn btn-primary" type="submit">Enviar</button>
+        </form>
+      </section>
+    </div>
   </main>
 
   <footer class="site-footer">
