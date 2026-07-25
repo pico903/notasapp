@@ -2,22 +2,16 @@
 (function(){
   const SUPABASE_URL = 'https://mtbxxaitvrfpoxqjljqh.supabase.co';
   const SUPABASE_ANON_KEY = 'sb_publishable_OQ7vnw2f1G7Ut6pO9wJU1w_Qak8akYi';
+  const SUPABASE_AUTH_URL = `${SUPABASE_URL}/auth/v1`;
+  const SUPABASE_REST_URL = `${SUPABASE_URL}/rest/v1`;
   const TABLE_NAME = 'notas';
   const CATEGORY_ID_BY_LABEL = { trabajo: 1, ideas: 2, personal: 3 };
   const LABEL_BY_CATEGORY_ID = { 1: 'trabajo', 2: 'ideas', 3: 'personal' };
   const LOCAL_AUTH_SESSION_KEY = 'notasapp.localSession';
+  const LOCAL_SUPABASE_SESSION_KEY = 'notasapp.supabaseSession';
   const LOCAL_USERS_STORAGE_KEY = 'notasapp.localUsers';
   const LOCAL_NOTES_PREFIX = 'notasapp.notes.';
   const REFRESH_INTERVAL_MS = 15000;
-
-  let supabase = null;
-  if(window.supabase){
-    try{
-      supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
-    }catch(error){
-      console.warn('No se pudo inicializar Supabase:', error?.message || error);
-    }
-  }
 
   let currentSession = null;
   let isRegisterMode = false;
@@ -73,6 +67,152 @@
 
   function clearLocalSession(){
     window.localStorage.removeItem(LOCAL_AUTH_SESSION_KEY);
+  }
+
+  function getSupabaseSession(){
+    try{
+      const raw = window.localStorage.getItem(LOCAL_SUPABASE_SESSION_KEY);
+      return raw ? JSON.parse(raw) : null;
+    }catch(error){
+      return null;
+    }
+  }
+
+  function persistSupabaseSession(session){
+    window.localStorage.setItem(LOCAL_SUPABASE_SESSION_KEY, JSON.stringify(session));
+  }
+
+  function clearSupabaseSession(){
+    window.localStorage.removeItem(LOCAL_SUPABASE_SESSION_KEY);
+  }
+
+  function buildSupabaseHeaders({ includeAuth = true, contentType = 'application/json' } = {}){
+    const headers = {
+      apikey: SUPABASE_ANON_KEY,
+      Accept: 'application/json',
+      'Content-Type': contentType
+    };
+
+    if(includeAuth){
+      const token = getSupabaseSession()?.access_token;
+      if(token){
+        headers.Authorization = `Bearer ${token}`;
+      }
+    }
+
+    return headers;
+  }
+
+  async function fetchSupabaseJson(url, options = {}){
+    const response = await fetch(url, {
+      ...options,
+      headers: {
+        ...buildSupabaseHeaders(options),
+        ...(options.headers || {})
+      }
+    });
+
+    const contentType = response.headers.get('content-type') || '';
+    const payload = contentType.includes('application/json') ? await response.json() : await response.text();
+
+    if(!response.ok){
+      const message = typeof payload === 'object' && payload && payload.msg
+        ? payload.msg
+        : (typeof payload === 'string' ? payload : 'Error de Supabase');
+      throw new Error(message);
+    }
+
+    return payload;
+  }
+
+  async function signUpSupabase(email, password){
+    const payload = await fetchSupabaseJson(`${SUPABASE_AUTH_URL}/signup`, {
+      method: 'POST',
+      body: JSON.stringify({ email, password })
+    });
+
+    return {
+      session: payload?.access_token ? {
+        provider: 'supabase',
+        access_token: payload.access_token,
+        refresh_token: payload.refresh_token,
+        user: {
+          id: payload.user?.id || payload.user_id || 'supabase-user',
+          email: payload.user?.email || email
+        }
+      } : null,
+      user: payload?.user || null,
+      error: null
+    };
+  }
+
+  async function signInSupabase(email, password){
+    const payload = await fetchSupabaseJson(`${SUPABASE_AUTH_URL}/token?grant_type=password`, {
+      method: 'POST',
+      body: JSON.stringify({ email, password })
+    });
+
+    return {
+      session: payload?.access_token ? {
+        provider: 'supabase',
+        access_token: payload.access_token,
+        refresh_token: payload.refresh_token,
+        user: {
+          id: payload.user?.id || payload.user_id || 'supabase-user',
+          email: payload.user?.email || email
+        }
+      } : null,
+      user: payload?.user || null,
+      error: null
+    };
+  }
+
+  async function getSupabaseUserFromToken(){
+    const payload = await fetchSupabaseJson(`${SUPABASE_AUTH_URL}/user`, {
+      method: 'GET'
+    });
+
+    return payload?.user || null;
+  }
+
+  async function loadNotesFromSupabase(userId){
+    const data = await fetchSupabaseJson(`${SUPABASE_REST_URL}/notas?select=*&user_id=eq.${encodeURIComponent(userId)}&order=id.desc`, {
+      method: 'GET'
+    });
+
+    return Array.isArray(data) ? data.map(mapSupabaseNote) : [];
+  }
+
+  async function saveNotesToSupabase(notes, userId){
+    const normalized = notes.map(note => ({
+      id: normalizeNoteId(note),
+      titulo: note.title ?? '',
+      contenido: note.body ?? '',
+      category: note.category ?? '',
+      creada_en: note.creada_en ?? new Date().toISOString(),
+      modificada_en: new Date().toISOString(),
+      user_id: userId
+    }));
+
+    const incomingIds = normalized.map(note => note.id);
+    const existing = await fetchSupabaseJson(`${SUPABASE_REST_URL}/notas?select=id,user_id`, {
+      method: 'GET'
+    });
+
+    const rowsToDelete = (Array.isArray(existing) ? existing : [])
+      .filter(row => row.user_id === userId && !incomingIds.includes(row.id))
+      .map(row => row.id);
+
+    if(rowsToDelete.length > 0){
+      await fetchSupabaseJson(`${SUPABASE_REST_URL}/notas?id=in.(${rowsToDelete.map(id => encodeURIComponent(String(id))).join(',')})`, {
+        method: 'DELETE'
+      });
+    }
+
+    await fetchSupabaseJson(`${SUPABASE_REST_URL}/notas?on_conflict=id`, {
+      method: 'POST',
+      body: JSON.stringify(normalized)
+    });
   }
 
   function getLocalNotesKey(userId){
@@ -164,44 +304,16 @@
       return;
     }
 
-    if(!supabase?.auth){
-      currentSession = null;
+    const storedSupabaseSession = getSupabaseSession();
+    if(storedSupabaseSession?.user){
+      currentSession = storedSupabaseSession;
       updateAuthUi(currentSession);
+      await refreshNotes();
       return;
     }
 
-    try{
-      const { data } = await supabase.auth.getSession();
-      currentSession = data.session;
-      updateAuthUi(currentSession);
-
-      if(currentSession?.user){
-        await refreshNotes();
-        setupRealtimeSync();
-      }
-    }catch(error){
-      console.warn('No se pudo inicializar Supabase Auth:', error?.message || error);
-      currentSession = null;
-      updateAuthUi(currentSession);
-    }
-  }
-
-  if(supabase?.auth){
-    try{
-      supabase.auth.onAuthStateChange((event, session) => {
-        currentSession = session;
-        updateAuthUi(session);
-
-        if(session?.user){
-          refreshNotes();
-          setupRealtimeSync();
-        } else {
-          stopRealtimeSync();
-        }
-      });
-    }catch(error){
-      console.warn('No se pudo registrar el cambio de estado de auth:', error?.message || error);
-    }
+    currentSession = null;
+    updateAuthUi(currentSession);
   }
 
   function getCategoryId(category){
@@ -287,36 +399,10 @@
 
   function setupRealtimeSync(){
     if(currentSession?.provider === 'local') return;
-
     startPolling();
-
-    if(notesChannel) return;
-
-    notesChannel = supabase.channel('notes-updates');
-
-    notesChannel.on('postgres_changes', {
-      event: '*',
-      schema: 'public',
-      table: TABLE_NAME
-    }, () => {
-      console.info('Cambio detectado en Supabase, refrescando lista');
-      refreshNotes();
-    });
-
-    notesChannel.subscribe((status) => {
-      if(status === 'SUBSCRIBED'){
-        console.info('Sincronización en tiempo real activada');
-      } else if(status === 'CHANNEL_ERROR' || status === 'TIMED_OUT'){
-        console.warn('Realtime no disponible; activando refresco periódico');
-      }
-    });
   }
 
   function stopRealtimeSync(){
-    if(notesChannel){
-      supabase.removeChannel(notesChannel);
-      notesChannel = null;
-    }
     if(refreshTimer){
       window.clearInterval(refreshTimer);
       refreshTimer = null;
@@ -326,26 +412,20 @@
   // Cargar notas desde Supabase o usar ejemplos
   async function loadNotes(){
     try{
-      const session = currentSession || getLocalSession();
+      const session = currentSession || getLocalSession() || getSupabaseSession();
       if(!session?.user) return [];
 
       if(session.provider === 'local'){
         return (loadNotesFromLocalStorage(session.user.id) || []).map(mapSupabaseNote);
       }
 
-      if(!supabase?.from){
-        return [];
-      }
-
       const userId = session.user.id;
-      const { data, error } = await supabase
-        .from(TABLE_NAME)
-        .select('*')
-        .eq('user_id', userId)
-        .order('id', { ascending: false });
-
-      if(error) throw error;
-      return (data || []).map(mapSupabaseNote);
+      try{
+        return await loadNotesFromSupabase(userId);
+      }catch(error){
+        console.warn('No se pudieron leer notas de Supabase, usando respaldo local:', error.message || error);
+        return (loadNotesFromLocalStorage(userId) || []).map(mapSupabaseNote);
+      }
     }catch(e){
       console.error('Error leyendo notas:', e);
       return [];
@@ -354,7 +434,7 @@
 
   async function saveNotes(notes){
     try{
-      const session = currentSession || getLocalSession();
+      const session = currentSession || getLocalSession() || getSupabaseSession();
       if(!session?.user) throw new Error('Usuario no autenticado.');
 
       if(session.provider === 'local'){
@@ -362,48 +442,14 @@
         return;
       }
 
-      if(!supabase?.from){
-        saveNotesToLocalStorage(notes, session.user.id);
-        return;
-      }
-
       const userId = session.user.id;
-      const normalized = notes.map(note => ({
-        id: normalizeNoteId(note),
-        titulo: note.title ?? '',
-        contenido: note.body ?? '',
-        category: note.category ?? '',
-        creada_en: note.creada_en ?? new Date().toISOString(),
-        modificada_en: new Date().toISOString(),
-        user_id: userId
-      }));
-
-      const { data: existingRows, error: listError } = await supabase
-        .from(TABLE_NAME)
-        .select('id')
-        .eq('user_id', userId);
-
-      if(listError) throw listError;
-
-      const incomingIds = new Set((notes || []).map(note => normalizeNoteId(note)));
-      const toDelete = (existingRows || [])
-        .map(row => String(row.id))
-        .filter(id => !incomingIds.has(id));
-
-      if(toDelete.length > 0){
-        const { error: deleteError } = await supabase
-          .from(TABLE_NAME)
-          .delete()
-          .in('id', toDelete)
-          .eq('user_id', userId);
-        if(deleteError) throw deleteError;
+      try{
+        await saveNotesToSupabase(notes, userId);
+        saveNotesToLocalStorage(notes, userId);
+      }catch(error){
+        console.warn('No se pudieron guardar notas en Supabase, usando respaldo local:', error.message || error);
+        saveNotesToLocalStorage(notes, userId);
       }
-
-      const { error: upsertError } = await supabase
-        .from(TABLE_NAME)
-        .upsert(normalized, { onConflict: 'id' });
-
-      if(upsertError) throw upsertError;
     }catch(e){
       console.error('Error guardando notas:', e);
       throw e;
@@ -601,29 +647,23 @@
 
     try{
       if(isRegisterMode){
-        if(supabase?.auth){
-          try{
-            const { data, error } = await supabase.auth.signUp({ email, password });
-            if(error) throw error;
-
-            if(data?.session?.user){
-              currentSession = data.session;
-              updateAuthUi(currentSession);
-              await refreshNotes();
-              return;
-            }
-          }catch(error){
-            const message = getFriendlyAuthMessage(error);
-            if(error?.code === 'over_email_send_rate_limit' || error?.code === 'over_request_rate_limit' || (error?.message || '').includes('rate limit')){
-              authMessage.textContent = message;
-              const localUser = registerLocalUser(email, password);
-              currentSession = persistLocalSession(localUser);
-              updateAuthUi(currentSession);
-              await refreshNotes();
-              return;
-            }
-            throw error;
+        try{
+          const result = await signUpSupabase(email, password);
+          if(result.session){
+            persistSupabaseSession(result.session);
+            currentSession = result.session;
+            updateAuthUi(currentSession);
+            await refreshNotes();
+            return;
           }
+        }catch(error){
+          const message = getFriendlyAuthMessage(error);
+          authMessage.textContent = message;
+          const localUser = registerLocalUser(email, password);
+          currentSession = persistLocalSession(localUser);
+          updateAuthUi(currentSession);
+          await refreshNotes();
+          return;
         }
 
         const localUser = registerLocalUser(email, password);
@@ -641,20 +681,20 @@
           return;
         }
 
-        if(supabase?.auth){
-          try{
-            const { data, error } = await supabase.auth.signInWithPassword({ email, password });
-            if(error) throw error;
-            currentSession = data.session;
+        try{
+          const result = await signInSupabase(email, password);
+          if(result.session){
+            persistSupabaseSession(result.session);
+            currentSession = result.session;
             updateAuthUi(currentSession);
             await refreshNotes();
             return;
-          }catch(error){
-            const message = getFriendlyAuthMessage(error);
-            authMessage.textContent = message;
-            alert(message);
-            return;
           }
+        }catch(error){
+          const message = getFriendlyAuthMessage(error);
+          authMessage.textContent = message;
+          alert(message);
+          return;
         }
 
         authMessage.textContent = 'No se pudo conectar con el servicio de autenticación. Inténtalo de nuevo en unos minutos.';
@@ -675,13 +715,7 @@
   });
 
   logoutBtn.addEventListener('click', async () => {
-    if(supabase?.auth){
-      try{
-        await supabase.auth.signOut();
-      }catch(error){
-        console.warn('No se pudo cerrar la sesión de Supabase:', error);
-      }
-    }
+    clearSupabaseSession();
     clearLocalSession();
     currentSession = null;
     updateAuthUi(currentSession);
