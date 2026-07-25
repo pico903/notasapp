@@ -13,6 +13,15 @@
   const LOCAL_NOTES_PREFIX = 'notasapp.notes.';
   const REFRESH_INTERVAL_MS = 15000;
 
+  let supabase = null;
+  if(window.supabase){
+    try{
+      supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+    }catch(error){
+      console.warn('No se pudo inicializar Supabase:', error?.message || error);
+    }
+  }
+
   let currentSession = null;
   let isRegisterMode = false;
 
@@ -86,104 +95,41 @@
     window.localStorage.removeItem(LOCAL_SUPABASE_SESSION_KEY);
   }
 
-  function buildSupabaseHeaders({ includeAuth = true, contentType = 'application/json' } = {}){
-    const headers = {
-      apikey: SUPABASE_ANON_KEY,
-      Accept: 'application/json',
-      'Content-Type': contentType
-    };
-
-    if(includeAuth){
-      const token = getSupabaseSession()?.access_token;
-      if(token){
-        headers.Authorization = `Bearer ${token}`;
-      }
-    }
-
-    return headers;
-  }
-
-  async function fetchSupabaseJson(url, options = {}){
-    const response = await fetch(url, {
-      ...options,
-      headers: {
-        ...buildSupabaseHeaders(options),
-        ...(options.headers || {})
-      }
-    });
-
-    const contentType = response.headers.get('content-type') || '';
-    const payload = contentType.includes('application/json') ? await response.json() : await response.text();
-
-    if(!response.ok){
-      const message = typeof payload === 'object' && payload && payload.msg
-        ? payload.msg
-        : (typeof payload === 'string' ? payload : 'Error de Supabase');
-      throw new Error(message);
-    }
-
-    return payload;
-  }
-
   async function signUpSupabase(email, password){
-    const payload = await fetchSupabaseJson(`${SUPABASE_AUTH_URL}/signup`, {
-      method: 'POST',
-      body: JSON.stringify({ email, password })
-    });
-
+    if(!supabase?.auth) throw new Error('Supabase no disponible');
+    const { data, error } = await supabase.auth.signUp({ email, password });
+    if(error) throw error;
     return {
-      session: payload?.access_token ? {
-        provider: 'supabase',
-        access_token: payload.access_token,
-        refresh_token: payload.refresh_token,
-        user: {
-          id: payload.user?.id || payload.user_id || 'supabase-user',
-          email: payload.user?.email || email
-        }
-      } : null,
-      user: payload?.user || null,
+      session: data.session ? { ...data.session, provider: 'supabase' } : null,
+      user: data.user || null,
       error: null
     };
   }
 
   async function signInSupabase(email, password){
-    const payload = await fetchSupabaseJson(`${SUPABASE_AUTH_URL}/token?grant_type=password`, {
-      method: 'POST',
-      body: JSON.stringify({ email, password })
-    });
-
+    if(!supabase?.auth) throw new Error('Supabase no disponible');
+    const { data, error } = await supabase.auth.signInWithPassword({ email, password });
+    if(error) throw error;
     return {
-      session: payload?.access_token ? {
-        provider: 'supabase',
-        access_token: payload.access_token,
-        refresh_token: payload.refresh_token,
-        user: {
-          id: payload.user?.id || payload.user_id || 'supabase-user',
-          email: payload.user?.email || email
-        }
-      } : null,
-      user: payload?.user || null,
+      session: data.session ? { ...data.session, provider: 'supabase' } : null,
+      user: data.user || null,
       error: null
     };
   }
 
-  async function getSupabaseUserFromToken(){
-    const payload = await fetchSupabaseJson(`${SUPABASE_AUTH_URL}/user`, {
-      method: 'GET'
-    });
-
-    return payload?.user || null;
-  }
-
   async function loadNotesFromSupabase(userId){
-    const data = await fetchSupabaseJson(`${SUPABASE_REST_URL}/notas?select=*&user_id=eq.${encodeURIComponent(userId)}&order=id.desc`, {
-      method: 'GET'
-    });
-
-    return Array.isArray(data) ? data.map(mapSupabaseNote) : [];
+    if(!supabase?.from) throw new Error('Supabase no disponible');
+    const { data, error } = await supabase
+      .from(TABLE_NAME)
+      .select('*')
+      .eq('user_id', userId)
+      .order('id', { ascending: false });
+    if(error) throw error;
+    return (data || []).map(mapSupabaseNote);
   }
 
   async function saveNotesToSupabase(notes, userId){
+    if(!supabase?.from) throw new Error('Supabase no disponible');
     const normalized = notes.map(note => ({
       id: normalizeNoteId(note),
       titulo: note.title ?? '',
@@ -194,25 +140,32 @@
       user_id: userId
     }));
 
-    const incomingIds = normalized.map(note => note.id);
-    const existing = await fetchSupabaseJson(`${SUPABASE_REST_URL}/notas?select=id,user_id`, {
-      method: 'GET'
-    });
+    const { data: existingRows, error: listError } = await supabase
+      .from(TABLE_NAME)
+      .select('id')
+      .eq('user_id', userId);
 
-    const rowsToDelete = (Array.isArray(existing) ? existing : [])
-      .filter(row => row.user_id === userId && !incomingIds.includes(row.id))
-      .map(row => row.id);
+    if(listError) throw listError;
 
-    if(rowsToDelete.length > 0){
-      await fetchSupabaseJson(`${SUPABASE_REST_URL}/notas?id=in.(${rowsToDelete.map(id => encodeURIComponent(String(id))).join(',')})`, {
-        method: 'DELETE'
-      });
+    const incomingIds = new Set(normalized.map(note => normalizeNoteId(note)));
+    const toDelete = (existingRows || [])
+      .map(row => String(row.id))
+      .filter(id => !incomingIds.has(id));
+
+    if(toDelete.length > 0){
+      const { error: deleteError } = await supabase
+        .from(TABLE_NAME)
+        .delete()
+        .in('id', toDelete)
+        .eq('user_id', userId);
+      if(deleteError) throw deleteError;
     }
 
-    await fetchSupabaseJson(`${SUPABASE_REST_URL}/notas?on_conflict=id`, {
-      method: 'POST',
-      body: JSON.stringify(normalized)
-    });
+    const { error: upsertError } = await supabase
+      .from(TABLE_NAME)
+      .upsert(normalized, { onConflict: 'id' });
+
+    if(upsertError) throw upsertError;
   }
 
   function getLocalNotesKey(userId){
@@ -304,12 +257,20 @@
       return;
     }
 
-    const storedSupabaseSession = getSupabaseSession();
-    if(storedSupabaseSession?.user){
-      currentSession = storedSupabaseSession;
-      updateAuthUi(currentSession);
-      await refreshNotes();
-      return;
+    if(supabase?.auth){
+      try{
+        const { data } = await supabase.auth.getSession();
+        const session = data.session ? { ...data.session, provider: 'supabase' } : null;
+        if(session?.user){
+          currentSession = session;
+          persistSupabaseSession(session);
+          updateAuthUi(currentSession);
+          await refreshNotes();
+          return;
+        }
+      }catch(error){
+        console.warn('No se pudo restaurar la sesión de Supabase:', error?.message || error);
+      }
     }
 
     currentSession = null;
@@ -400,9 +361,26 @@
   function setupRealtimeSync(){
     if(currentSession?.provider === 'local') return;
     startPolling();
+
+    if(notesChannel || !supabase?.channel) return;
+
+    notesChannel = supabase.channel('notes-updates');
+    notesChannel.on('postgres_changes', {
+      event: '*',
+      schema: 'public',
+      table: TABLE_NAME
+    }, () => {
+      refreshNotes();
+    });
+
+    notesChannel.subscribe();
   }
 
   function stopRealtimeSync(){
+    if(notesChannel && supabase?.removeChannel){
+      supabase.removeChannel(notesChannel);
+      notesChannel = null;
+    }
     if(refreshTimer){
       window.clearInterval(refreshTimer);
       refreshTimer = null;
