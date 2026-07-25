@@ -17,8 +17,6 @@
     }catch(error){
       console.warn('No se pudo inicializar Supabase:', error?.message || error);
     }
-  } else {
-    console.warn('Supabase SDK no disponible; usando modo local.');
   }
 
   let currentSession = null;
