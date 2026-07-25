@@ -5,11 +5,105 @@
   const TABLE_NAME = 'notas';
   const CATEGORY_ID_BY_LABEL = { trabajo: 1, ideas: 2, personal: 3 };
   const LABEL_BY_CATEGORY_ID = { 1: 'trabajo', 2: 'ideas', 3: 'personal' };
+  const LOCAL_AUTH_SESSION_KEY = 'notasapp.localSession';
+  const LOCAL_USERS_STORAGE_KEY = 'notasapp.localUsers';
+  const LOCAL_NOTES_PREFIX = 'notasapp.notes.';
 
   const supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
   let currentSession = null;
   let isRegisterMode = false;
+
+  function getLocalUsers(){
+    try{
+      const raw = window.localStorage.getItem(LOCAL_USERS_STORAGE_KEY);
+      return raw ? JSON.parse(raw) : [];
+    }catch(error){
+      console.warn('No se pudieron leer usuarios locales:', error);
+      return [];
+    }
+  }
+
+  function saveLocalUsers(users){
+    window.localStorage.setItem(LOCAL_USERS_STORAGE_KEY, JSON.stringify(users));
+  }
+
+  function getStoredLocalUser(email){
+    const normalized = String(email || '').trim().toLowerCase();
+    return getLocalUsers().find(user => (user.email || '').toLowerCase() === normalized) || null;
+  }
+
+  function registerLocalUser(email, password){
+    const users = getLocalUsers();
+    if(getStoredLocalUser(email)) throw new Error('Ya existe una cuenta local con ese correo.');
+    const user = { id: createNoteId(), email: String(email).trim().toLowerCase(), password, createdAt: new Date().toISOString() };
+    users.push(user);
+    saveLocalUsers(users);
+    return user;
+  }
+
+  function loginLocalUser(email, password){
+    const user = getStoredLocalUser(email);
+    if(!user || user.password !== password) throw new Error('Correo o contraseña incorrectos.');
+    return user;
+  }
+
+  function getLocalSession(){
+    try{
+      const raw = window.localStorage.getItem(LOCAL_AUTH_SESSION_KEY);
+      return raw ? JSON.parse(raw) : null;
+    }catch(error){
+      return null;
+    }
+  }
+
+  function persistLocalSession(user){
+    const session = { provider: 'local', user: { id: user.id, email: user.email } };
+    window.localStorage.setItem(LOCAL_AUTH_SESSION_KEY, JSON.stringify(session));
+    return session;
+  }
+
+  function clearLocalSession(){
+    window.localStorage.removeItem(LOCAL_AUTH_SESSION_KEY);
+  }
+
+  function getLocalNotesKey(userId){
+    return `${LOCAL_NOTES_PREFIX}${userId}`;
+  }
+
+  function loadNotesFromLocalStorage(userId){
+    if(!userId) return [];
+    try{
+      const raw = window.localStorage.getItem(getLocalNotesKey(userId));
+      return raw ? JSON.parse(raw) : [];
+    }catch(error){
+      console.warn('No se pudieron cargar notas locales:', error);
+      return [];
+    }
+  }
+
+  function saveNotesToLocalStorage(notes, userId){
+    if(!userId) return;
+    window.localStorage.setItem(getLocalNotesKey(userId), JSON.stringify(notes));
+  }
+
+  function getFriendlyAuthMessage(error){
+    const code = error?.code || error?.status || '';
+    const message = error?.message || '';
+    if(code === 'over_email_send_rate_limit' || code === 'over_request_rate_limit' || message.includes('rate limit')){
+      return 'Se han enviado demasiados correos de confirmación. Espera unos minutos o prueba con otro correo.';
+    }
+    if(code === 'invalid_credentials' || message.includes('Invalid login credentials')){
+      return 'Correo o contraseña incorrectos.';
+    }
+    if(code === 'email_address_invalid' || message.includes('invalid email')){
+      return 'Introduce un correo válido.';
+    }
+    if(message.includes('fetch')){
+      return 'No se pudo conectar con el servicio de autenticación.';
+    }
+    return message || 'No se pudo completar la autenticación.';
+  }
 
   const authSection = document.getElementById('authSection');
   const appSection = document.getElementById('appSection');
@@ -54,27 +148,45 @@
   }
 
   async function initAuth(){
-    const { data } = await supabase.auth.getSession();
-    currentSession = data.session;
-    updateAuthUi(currentSession);
-
-    if(currentSession?.user){
+    const localSession = getLocalSession();
+    if(localSession?.user){
+      currentSession = localSession;
+      updateAuthUi(currentSession);
       await refreshNotes();
-      setupRealtimeSync();
+      return;
+    }
+
+    try{
+      const { data } = await supabase.auth.getSession();
+      currentSession = data.session;
+      updateAuthUi(currentSession);
+
+      if(currentSession?.user){
+        await refreshNotes();
+        setupRealtimeSync();
+      }
+    }catch(error){
+      console.warn('No se pudo inicializar Supabase Auth:', error?.message || error);
+      currentSession = null;
+      updateAuthUi(currentSession);
     }
   }
 
-  supabase.auth.onAuthStateChange((event, session) => {
-    currentSession = session;
-    updateAuthUi(session);
+  try{
+    supabase.auth.onAuthStateChange((event, session) => {
+      currentSession = session;
+      updateAuthUi(session);
 
-    if(session?.user){
-      refreshNotes();
-      setupRealtimeSync();
-    } else {
-      stopRealtimeSync();
-    }
-  });
+      if(session?.user){
+        refreshNotes();
+        setupRealtimeSync();
+      } else {
+        stopRealtimeSync();
+      }
+    });
+  }catch(error){
+    console.warn('No se pudo registrar el cambio de estado de auth:', error?.message || error);
+  }
 
   function getCategoryId(category){
     return CATEGORY_ID_BY_LABEL[category] ?? null;
@@ -158,6 +270,8 @@
   }
 
   function setupRealtimeSync(){
+    if(currentSession?.provider === 'local') return;
+
     startPolling();
 
     if(notesChannel) return;
@@ -196,8 +310,12 @@
   // Cargar notas desde Supabase o usar ejemplos
   async function loadNotes(){
     try{
-      const session = currentSession || (await supabase.auth.getSession()).data.session;
+      const session = currentSession || (await supabase.auth.getSession()).data.session || getLocalSession();
       if(!session?.user) return [];
+
+      if(session.provider === 'local'){
+        return (loadNotesFromLocalStorage(session.user.id) || []).map(mapSupabaseNote);
+      }
 
       const userId = session.user.id;
       const { data, error } = await supabase
@@ -216,8 +334,13 @@
 
   async function saveNotes(notes){
     try{
-      const session = currentSession || (await supabase.auth.getSession()).data.session;
+      const session = currentSession || (await supabase.auth.getSession()).data.session || getLocalSession();
       if(!session?.user) throw new Error('Usuario no autenticado.');
+
+      if(session.provider === 'local'){
+        saveNotesToLocalStorage(notes, session.user.id);
+        return;
+      }
 
       const userId = session.user.id;
       const normalized = notes.map(note => ({
@@ -438,7 +561,7 @@
   // Login / registro
   authForm.addEventListener('submit', async function(e){
     e.preventDefault();
-    const email = authEmail.value.trim();
+    const email = authEmail.value.trim().toLowerCase();
     const password = authPassword.value;
 
     if(!email || !password){
@@ -446,18 +569,66 @@
       return;
     }
 
+    authMessage.textContent = 'Procesando...';
+
     try{
       if(isRegisterMode){
-        const { error } = await supabase.auth.signUp({ email, password });
-        if(error) throw error;
-        authMessage.textContent = 'Cuenta creada, revisa tu email si corresponde para activar el acceso.';
+        try{
+          const { data, error } = await supabase.auth.signUp({ email, password });
+          if(error) throw error;
+
+          if(data?.session?.user){
+            currentSession = data.session;
+            updateAuthUi(currentSession);
+            await refreshNotes();
+            return;
+          }
+        }catch(error){
+          const message = getFriendlyAuthMessage(error);
+          if(error?.code === 'over_email_send_rate_limit' || error?.code === 'over_request_rate_limit' || (error?.message || '').includes('rate limit')){
+            authMessage.textContent = message;
+            const localUser = registerLocalUser(email, password);
+            currentSession = persistLocalSession(localUser);
+            updateAuthUi(currentSession);
+            await refreshNotes();
+            return;
+          }
+          throw error;
+        }
+
+        const localUser = registerLocalUser(email, password);
+        currentSession = persistLocalSession(localUser);
+        updateAuthUi(currentSession);
+        authMessage.textContent = 'Cuenta creada localmente. Ya puedes entrar en este dispositivo.';
+        await refreshNotes();
       } else {
-        const { error } = await supabase.auth.signInWithPassword({ email, password });
-        if(error) throw error;
+        const localUser = getStoredLocalUser(email);
+        if(localUser && localUser.password === password){
+          currentSession = persistLocalSession(localUser);
+          updateAuthUi(currentSession);
+          authMessage.textContent = 'Sesión iniciada localmente.';
+          await refreshNotes();
+          return;
+        }
+
+        try{
+          const { data, error } = await supabase.auth.signInWithPassword({ email, password });
+          if(error) throw error;
+          currentSession = data.session;
+          updateAuthUi(currentSession);
+          await refreshNotes();
+          return;
+        }catch(error){
+          const message = getFriendlyAuthMessage(error);
+          authMessage.textContent = message;
+          alert(message);
+          return;
+        }
       }
     }catch(err){
-      console.error('Error de autenticación:', err);
-      alert(err.message || 'No se pudo iniciar sesión. Revisa tus credenciales.');
+      console.warn('Error de autenticación:', err?.message || err);
+      authMessage.textContent = getFriendlyAuthMessage(err);
+      alert(getFriendlyAuthMessage(err));
     }
   });
 
@@ -468,7 +639,15 @@
   });
 
   logoutBtn.addEventListener('click', async () => {
-    await supabase.auth.signOut();
+    try{
+      await supabase.auth.signOut();
+    }catch(error){
+      console.warn('No se pudo cerrar la sesión de Supabase:', error);
+    }
+    clearLocalSession();
+    currentSession = null;
+    updateAuthUi(currentSession);
+    stopRealtimeSync();
   });
 
   // Abrir modal para nueva nota
