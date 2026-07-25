@@ -8,8 +8,18 @@
   const LOCAL_AUTH_SESSION_KEY = 'notasapp.localSession';
   const LOCAL_USERS_STORAGE_KEY = 'notasapp.localUsers';
   const LOCAL_NOTES_PREFIX = 'notasapp.notes.';
+  const REFRESH_INTERVAL_MS = 15000;
 
-  const supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+  let supabase = null;
+  if(window.supabase){
+    try{
+      supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+    }catch(error){
+      console.warn('No se pudo inicializar Supabase:', error?.message || error);
+    }
+  } else {
+    console.warn('Supabase SDK no disponible; usando modo local.');
+  }
 
   let currentSession = null;
   let isRegisterMode = false;
@@ -156,6 +166,12 @@
       return;
     }
 
+    if(!supabase?.auth){
+      currentSession = null;
+      updateAuthUi(currentSession);
+      return;
+    }
+
     try{
       const { data } = await supabase.auth.getSession();
       currentSession = data.session;
@@ -172,20 +188,22 @@
     }
   }
 
-  try{
-    supabase.auth.onAuthStateChange((event, session) => {
-      currentSession = session;
-      updateAuthUi(session);
+  if(supabase?.auth){
+    try{
+      supabase.auth.onAuthStateChange((event, session) => {
+        currentSession = session;
+        updateAuthUi(session);
 
-      if(session?.user){
-        refreshNotes();
-        setupRealtimeSync();
-      } else {
-        stopRealtimeSync();
-      }
-    });
-  }catch(error){
-    console.warn('No se pudo registrar el cambio de estado de auth:', error?.message || error);
+        if(session?.user){
+          refreshNotes();
+          setupRealtimeSync();
+        } else {
+          stopRealtimeSync();
+        }
+      });
+    }catch(error){
+      console.warn('No se pudo registrar el cambio de estado de auth:', error?.message || error);
+    }
   }
 
   function getCategoryId(category){
@@ -266,7 +284,7 @@
     if(refreshTimer) return;
     refreshTimer = window.setInterval(() => {
       refreshNotes().catch(err => console.error('Error al refrescar notas:', err));
-    }, 2500);
+    }, REFRESH_INTERVAL_MS);
   }
 
   function setupRealtimeSync(){
@@ -310,11 +328,15 @@
   // Cargar notas desde Supabase o usar ejemplos
   async function loadNotes(){
     try{
-      const session = currentSession || (await supabase.auth.getSession()).data.session || getLocalSession();
+      const session = currentSession || getLocalSession();
       if(!session?.user) return [];
 
       if(session.provider === 'local'){
         return (loadNotesFromLocalStorage(session.user.id) || []).map(mapSupabaseNote);
+      }
+
+      if(!supabase?.from){
+        return [];
       }
 
       const userId = session.user.id;
@@ -334,10 +356,15 @@
 
   async function saveNotes(notes){
     try{
-      const session = currentSession || (await supabase.auth.getSession()).data.session || getLocalSession();
+      const session = currentSession || getLocalSession();
       if(!session?.user) throw new Error('Usuario no autenticado.');
 
       if(session.provider === 'local'){
+        saveNotesToLocalStorage(notes, session.user.id);
+        return;
+      }
+
+      if(!supabase?.from){
         saveNotesToLocalStorage(notes, session.user.id);
         return;
       }
@@ -539,13 +566,16 @@
       const payload = await response.json();
       thinking.remove();
       if(!response.ok){
-        addChatMessage('assistant', payload.error || 'No pude responder.');
+        const friendlyMessage = response.status === 429
+          ? 'El asistente está temporalmente saturado. Prueba otra vez en unos segundos.'
+          : (payload.error || 'No pude responder.');
+        addChatMessage('assistant', friendlyMessage);
         return;
       }
       addChatMessage('assistant', payload.answer || 'Sin respuesta.');
     }catch(err){
       thinking.remove();
-      addChatMessage('assistant', 'No se pudo conectar con el asistente.');
+      addChatMessage('assistant', 'No se pudo conectar con el asistente en este momento.');
       console.error(err);
     }
   }
@@ -573,27 +603,29 @@
 
     try{
       if(isRegisterMode){
-        try{
-          const { data, error } = await supabase.auth.signUp({ email, password });
-          if(error) throw error;
+        if(supabase?.auth){
+          try{
+            const { data, error } = await supabase.auth.signUp({ email, password });
+            if(error) throw error;
 
-          if(data?.session?.user){
-            currentSession = data.session;
-            updateAuthUi(currentSession);
-            await refreshNotes();
-            return;
+            if(data?.session?.user){
+              currentSession = data.session;
+              updateAuthUi(currentSession);
+              await refreshNotes();
+              return;
+            }
+          }catch(error){
+            const message = getFriendlyAuthMessage(error);
+            if(error?.code === 'over_email_send_rate_limit' || error?.code === 'over_request_rate_limit' || (error?.message || '').includes('rate limit')){
+              authMessage.textContent = message;
+              const localUser = registerLocalUser(email, password);
+              currentSession = persistLocalSession(localUser);
+              updateAuthUi(currentSession);
+              await refreshNotes();
+              return;
+            }
+            throw error;
           }
-        }catch(error){
-          const message = getFriendlyAuthMessage(error);
-          if(error?.code === 'over_email_send_rate_limit' || error?.code === 'over_request_rate_limit' || (error?.message || '').includes('rate limit')){
-            authMessage.textContent = message;
-            const localUser = registerLocalUser(email, password);
-            currentSession = persistLocalSession(localUser);
-            updateAuthUi(currentSession);
-            await refreshNotes();
-            return;
-          }
-          throw error;
         }
 
         const localUser = registerLocalUser(email, password);
@@ -611,19 +643,25 @@
           return;
         }
 
-        try{
-          const { data, error } = await supabase.auth.signInWithPassword({ email, password });
-          if(error) throw error;
-          currentSession = data.session;
-          updateAuthUi(currentSession);
-          await refreshNotes();
-          return;
-        }catch(error){
-          const message = getFriendlyAuthMessage(error);
-          authMessage.textContent = message;
-          alert(message);
-          return;
+        if(supabase?.auth){
+          try{
+            const { data, error } = await supabase.auth.signInWithPassword({ email, password });
+            if(error) throw error;
+            currentSession = data.session;
+            updateAuthUi(currentSession);
+            await refreshNotes();
+            return;
+          }catch(error){
+            const message = getFriendlyAuthMessage(error);
+            authMessage.textContent = message;
+            alert(message);
+            return;
+          }
         }
+
+        authMessage.textContent = 'No se pudo conectar con el servicio de autenticación. Inténtalo de nuevo en unos minutos.';
+        alert('No se pudo conectar con el servicio de autenticación. Inténtalo de nuevo en unos minutos.');
+        return;
       }
     }catch(err){
       console.warn('Error de autenticación:', err?.message || err);
@@ -639,10 +677,12 @@
   });
 
   logoutBtn.addEventListener('click', async () => {
-    try{
-      await supabase.auth.signOut();
-    }catch(error){
-      console.warn('No se pudo cerrar la sesión de Supabase:', error);
+    if(supabase?.auth){
+      try{
+        await supabase.auth.signOut();
+      }catch(error){
+        console.warn('No se pudo cerrar la sesión de Supabase:', error);
+      }
     }
     clearLocalSession();
     currentSession = null;
